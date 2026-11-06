@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>HandConnect - My AI Project</title>
+
+    <!-- MediaPipe Hand Tracking -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+
+    <!-- Camera Support -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            background: black;
+            color: white;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+
+        video, canvas {
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+
+        .hud {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(0,0,0,0.7);
+            padding: 15px;
+            border-radius: 10px;
+        }
+
+        #message {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 20;
+            font-size: 20px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <video id="video" autoplay playsinline muted></video>
+
+    <canvas id="canvas"></canvas>
+
+    <div class="hud">
+        <h3>HAND CONNECT AI</h3>
+        <p>Hands Detected: <span id="hands">0</span></p>
+        <p>FPS: <span id="fps">0</span></p>
+        <p>Gesture: <span id="gesture">Waiting...</span></p>
+    </div>
+
+    <div id="message">Initializing HandConnect...</div>
+
+    <script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+const message = document.getElementById("message");
+const handCount = document.getElementById("hands");
+const fpsDisplay = document.getElementById("fps");
+const gestureDisplay = document.getElementById("gesture");
+
+let lastFrameTime = performance.now();
+let fps = 0;
+let fpsSmooth = 0;
+
+// 1. Resize canvas
+function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+
+resizeCanvas();
+window.addEventListener("resize", resizeCanvas);
+
+
+// 2. Create MediaPipe Hands
+const tracker = new Hands({
+    locateFile: (file) =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+});
+
+// 3. Configure hand tracking
+tracker.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 0,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.5
+});
+
+function detectGesture(lm) {
+
+    // Calculate distance between two landmarks
+    const distance = (i, j) => {
+        return Math.hypot(
+            lm[i].x - lm[j].x,
+            lm[i].y - lm[j].y
+        );
+    };
+
+    // Check extended fingers
+    const open = [8, 12, 16, 20].filter(t =>
+        distance(t, 0) > distance(t - 2, 0)
+    ).length;
+
+    // Pinch detection
+    if (distance(4, 8) < 0.05) {
+        return "Pinch";
+    }
+
+    if (open >= 4) {
+        return "Open Hand";
+    }
+
+    if (open === 0) {
+        return "Fist";
+    }
+
+    if (open === 1) {
+        return "Point";
+    }
+
+    return "Partial";
+}
+// Hand skeleton connections
+const BONES = [
+    [0,1], [1,2], [2,3], [3,4],
+    [0,5], [5,6], [6,7], [7,8],
+    [5,9], [9,10], [10,11], [11,12],
+    [9,13], [13,14], [14,15], [15,16],
+    [13,17], [17,18], [18,19], [19,20],
+    [0,17]
+];
+
+// Five fingertip landmark numbers
+const TIPS = [4, 8, 12, 16, 20];
+
+// Neon colors
+const HAND_COLORS = ["#ff4fd8", "#ffe83a"];
+
+const BEAM_COLORS = [
+    "#ff3b3b",
+    "#ff9a2e",
+    "#7dff5a",
+    "#3ad7ff",
+    "#c46bff"
+];
+
+
+// Convert landmark coordinates into canvas pixels
+function toPx(p) {
+
+    const vw = video.videoWidth || 1280;
+    const vh = video.videoHeight || 720;
+
+    const s = Math.max(
+        canvas.width / vw,
+        canvas.height / vh
+    );
+
+    return {
+        x: p.x * vw * s - (vw * s - canvas.width) / 2,
+        y: p.y * vh * s - (vh * s - canvas.height) / 2
+    };
+}
+
+
+// Draw glowing neon lines
+function glowLine(a, b, color, width) {
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 18;
+
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+
+    // White glowing core
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = width / 3;
+    ctx.shadowBlur = 0;
+
+    ctx.stroke();
+}
+// Store animated sparks
+let sparks = [];
+
+// Create a spark at a fingertip
+function addSpark(point, color) {
+
+    sparks.push({
+        x: point.x,
+        y: point.y,
+        life: 1,
+        color: color,
+        vx: (Math.random() - 0.5) * 6,
+        vy: (Math.random() - 0.5) * 6
+    });
+
+}
+
+
+// Animate and draw sparks
+function drawSparks() {
+
+    // Remove expired sparks
+    sparks = sparks.filter(spark =>
+        (spark.life -= 0.04) > 0
+    );
+
+    for (const spark of sparks) {
+
+        spark.x += spark.vx;
+        spark.y += spark.vy;
+
+        ctx.globalAlpha = spark.life;
+        ctx.strokeStyle = spark.color;
+        ctx.lineWidth = 2;
+
+        ctx.beginPath();
+
+        ctx.moveTo(spark.x, spark.y);
+
+        ctx.lineTo(
+            spark.x - spark.vx * 2,
+            spark.y - spark.vy * 2
+        );
+
+        ctx.stroke();
+    }
+
+    ctx.globalAlpha = 1;
+}
+// 4. Process detected hands
+tracker.onResults((results) => {
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const hands = results.multiHandLandmarks || [];
+
+    handCount.textContent = hands.length;
+
+    // Calculate FPS
+    const now = performance.now();
+const currentFPS = 1000 / (now - lastFrameTime);
+
+fpsSmooth = fpsSmooth * 0.9 + currentFPS * 0.1;
+
+lastFrameTime = now;
+fpsDisplay.textContent = Math.round(fpsSmooth);
+
+    // Draw hand landmarks
+    // Convert all hand landmarks to canvas positions
+const pixelHands = hands.map(hand =>
+    hand.map(toPx)
+);
+
+// Draw neon skeleton on each hand
+pixelHands.forEach((points, h) => {
+
+    for (const [a, b] of BONES) {
+
+        glowLine(
+            points[a],
+            points[b],
+            HAND_COLORS[h % 2],
+            4
+        );
+
+    }
+
+});
+
+// Connect matching fingertips with rainbow beams
+if (pixelHands.length === 2) {
+
+    TIPS.forEach((tip, i) => {
+
+        // Draw rainbow beam
+        glowLine(
+            pixelHands[0][tip],
+            pixelHands[1][tip],
+            BEAM_COLORS[i],
+            6
+        );
+
+        // Create fingertip sparks
+        if (Math.random() < 0.35) {
+            addSpark(pixelHands[0][tip], BEAM_COLORS[i]);
+        }
+
+        if (Math.random() < 0.35) {
+            addSpark(pixelHands[1][tip], BEAM_COLORS[i]);
+        }
+
+    });
+
+}
+
+// Animate sparks on every frame
+drawSparks();
+
+    // Update gesture status
+    if (hands.length > 0) {
+        gestureDisplay.textContent =
+    detectGesture(hands[0]);
+        message.style.display = "none";
+    } else {
+        gestureDisplay.textContent = "No Hand";
+        message.style.display = "block";
+        message.textContent = "Show your hand to the camera";
+    }
+
+});
+
+
+// 5. Start webcam
+async function startCamera() {
+
+    try {
+
+        const stream =
+            await navigator.mediaDevices.getUserMedia({
+                video: {
+                    width: 1280,
+                    height: 720
+                },
+                audio: false
+            });
+
+        video.srcObject = stream;
+
+        await video.play();
+
+        message.textContent = "Loading AI model...";
+
+        // Send video frames to MediaPipe
+        async function detectHands() {
+
+            if (video.readyState >= 2) {
+                await tracker.send({
+                    image: video
+                });
+            }
+
+            requestAnimationFrame(detectHands);
+        }
+
+        detectHands();
+
+    } catch (error) {
+
+        console.error(error);
+        message.textContent = "Camera or AI initialization failed!";
+
+    }
+}
+
+startCamera();
+
+</script>
+
+</body>
+</html>
+# Hand Tracking with MediaPipe and Canvas
+# This project uses MediaPipe's hand tracking solution to detect and visualize hand landmarks in real-time using a webcam feed. The detected hands are drawn on a canvas with neon effects, and the application calculates the frames per second (FPS) for performance monitoring.  
+### Features
+# Detects up to two hands in real-time.
+# Visualizes hand landmarks and connections with neon effects.
+# Displays the number of hands detected and the current FPS.
+# Detects simple hand gestures (Open Hand, Fist, Point, Pinch, Partial).
+# python -m http.server 8000 to run the code in the terminal and then open the browser and go to http://localhost:8000 to see the hand tracking in action.
